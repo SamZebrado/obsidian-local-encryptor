@@ -21,6 +21,7 @@
     "src/crypto.ts",
     "src/encryptedBlock.ts",
     "src/backup.ts",
+    "src/imageBundle.ts",
     "src/keychain.ts",
     "src/manifest.ts",
     "src/noteBundle.ts",

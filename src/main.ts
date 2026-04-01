@@ -20,7 +20,15 @@ import {
   wrapEncryptedPayload
 } from "./encryptedBlock";
 import { MacKeychainPasswordStore } from "./keychain";
-import { buildTimestampManifest, type SkippedAttachmentRecord, writeTimestampManifest } from "./manifest";
+import { buildStandaloneImageBundle, parseStandaloneImageBundle, STANDALONE_IMAGE_EXTENSION } from "./imageBundle";
+import {
+  buildFolderBatchManifest,
+  buildTimestampManifest,
+  readFolderBatchManifest,
+  type SkippedAttachmentRecord,
+  writeFolderBatchManifest,
+  writeTimestampManifest
+} from "./manifest";
 import {
   buildAttachmentLookupCandidates,
   buildNoteBundle,
@@ -404,9 +412,17 @@ export default class LocalEncryptorPlugin extends Plugin {
     }
 
     const folderPath = folder.path;
+    if (action === "encrypt") {
+      await this.encryptSubfolders(folder);
+    }
     const files = this.getFolderFiles(folderPath);
-    if (files.length === 0) {
-      new Notice("No markdown files found in the selected folder.");
+    const folderImages =
+      action === "encrypt" ? this.getFolderImageFiles(folderPath) : this.getStandaloneEncryptedImageFiles(folderPath);
+    const hasSubfolders = this.app.vault
+      .getAllLoadedFiles()
+      .some((file) => file instanceof TFolder && file.path.startsWith(`${folderPath}/`));
+    if (files.length === 0 && folderImages.length === 0 && !hasSubfolders) {
+      new Notice("No notes, images, or subfolders found in the selected folder.");
       return;
     }
 
@@ -421,6 +437,13 @@ export default class LocalEncryptorPlugin extends Plugin {
       }
     }
 
+    if (action === "encrypt") {
+      results.push(...(await this.encryptStandaloneImagesInFolder(folderPath, password)));
+    } else {
+      results.push(...(await this.decryptStandaloneImagesInFolder(folderPath, password)));
+      await this.restoreSubfolders(folderPath);
+    }
+
     this.showBatchSummary(action, folderPath || "/", results);
   }
 
@@ -430,6 +453,24 @@ export default class LocalEncryptorPlugin extends Plugin {
       .getFiles()
       .filter((file) => file.extension === "md")
       .filter((file) => (folderPath ? file.path.startsWith(prefix) : true))
+      .sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  private getFolderImageFiles(folderPath: string): TFile[] {
+    const prefix = folderPath ? `${folderPath}/` : "";
+    return this.app.vault
+      .getFiles()
+      .filter((file) => file.path.startsWith(prefix))
+      .filter((file) => isImagePath(file.path))
+      .sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  private getStandaloneEncryptedImageFiles(folderPath: string): TFile[] {
+    const prefix = folderPath ? `${folderPath}/` : "";
+    return this.app.vault
+      .getFiles()
+      .filter((file) => file.path.startsWith(prefix))
+      .filter((file) => file.extension === STANDALONE_IMAGE_EXTENSION)
       .sort((a, b) => a.path.localeCompare(b.path));
   }
 
@@ -700,6 +741,143 @@ export default class LocalEncryptorPlugin extends Plugin {
     }
 
     return null;
+  }
+
+  private async encryptStandaloneImagesInFolder(folderPath: string, password: string): Promise<BatchResult[]> {
+    const results: BatchResult[] = [];
+    for (const file of this.getFolderImageFiles(folderPath)) {
+      try {
+        const stat = await this.app.vault.adapter.stat(file.path);
+        if (!stat) {
+          results.push({ outcome: "failed", path: file.path, reason: "image stat missing" });
+          continue;
+        }
+
+        const binary = await this.app.vault.adapter.readBinary(file.path);
+        const payload = buildStandaloneImageBundle(
+          file.path,
+          file.name,
+          Buffer.from(binary).toString("base64"),
+          { mtime: stat.mtime, ctime: stat.ctime }
+        );
+        const encrypted = await encryptText(payload, password);
+        const placeholderPath = await this.getStandaloneImagePlaceholderPath(file);
+        await this.app.vault.create(placeholderPath, encrypted);
+        await this.app.vault.delete(file);
+        results.push({ outcome: "updated", path: placeholderPath });
+      } catch (error) {
+        results.push({
+          outcome: "failed",
+          path: file.path,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    return results;
+  }
+
+  private async decryptStandaloneImagesInFolder(folderPath: string, password: string): Promise<BatchResult[]> {
+    const results: BatchResult[] = [];
+    for (const file of this.getStandaloneEncryptedImageFiles(folderPath)) {
+      try {
+        const encrypted = await this.app.vault.read(file);
+        const decrypted = await decryptText(encrypted, password);
+        const bundle = parseStandaloneImageBundle(decrypted);
+        await this.ensureParentDirectory(bundle.originalPath);
+        const bytes = Uint8Array.from(Buffer.from(bundle.dataBase64, "base64"));
+        await this.app.vault.adapter.writeBinary(
+          bundle.originalPath,
+          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+        );
+        await this.restoreFileTimes(bundle.originalPath, bundle);
+        await this.app.vault.delete(file);
+        results.push({ outcome: "updated", path: bundle.originalPath });
+      } catch (error) {
+        results.push({
+          outcome: "failed",
+          path: file.path,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    return results;
+  }
+
+  private async getStandaloneImagePlaceholderPath(file: TFile): Promise<string> {
+    const folderPath = file.parent?.path ?? "";
+    let index = 1;
+    while (true) {
+      const candidate = folderPath
+        ? normalizePath(`${folderPath}/图片${index}.${STANDALONE_IMAGE_EXTENSION}`)
+        : `图片${index}.${STANDALONE_IMAGE_EXTENSION}`;
+      if (!(await this.app.vault.adapter.exists(candidate))) {
+        return candidate;
+      }
+      index += 1;
+    }
+  }
+
+  private async encryptSubfolders(rootFolder: TFolder): Promise<void> {
+    const folders = this.app.vault
+      .getAllLoadedFiles()
+      .filter((file): file is TFolder => file instanceof TFolder)
+      .filter((folder) => folder.path.startsWith(`${rootFolder.path}/`))
+      .sort((a, b) => a.path.split("/").length - b.path.split("/").length);
+
+    const originalPaths = new Map<TFolder, string>();
+    for (const folder of folders) {
+      originalPaths.set(folder, folder.path);
+      const newPath = await this.getFolderPlaceholderPath(folder);
+      await this.app.fileManager.renameFile(folder, newPath);
+    }
+
+    const renames = folders.map((folder) => ({
+      originalRelativePath: this.relativeToRoot(rootFolder.path, originalPaths.get(folder) ?? folder.path),
+      encryptedRelativePath: this.relativeToRoot(rootFolder.path, folder.path)
+    }));
+
+    await writeFolderBatchManifest(this, buildFolderBatchManifest(rootFolder.path, renames));
+  }
+
+  private async restoreSubfolders(rootFolderPath: string): Promise<void> {
+    const manifest = await readFolderBatchManifest(this, rootFolderPath);
+    if (!manifest) {
+      return;
+    }
+
+    const renames = [...manifest.folderRenames].sort(
+      (left, right) => right.encryptedRelativePath.split("/").length - left.encryptedRelativePath.split("/").length
+    );
+
+    for (const rename of renames) {
+      const currentPath = normalizePath(`${rootFolderPath}/${rename.encryptedRelativePath}`);
+      if (!(await this.app.vault.adapter.exists(currentPath))) {
+        continue;
+      }
+      const folder = this.app.vault.getAbstractFileByPath(currentPath);
+      if (folder instanceof TFolder) {
+        await this.app.fileManager.renameFile(folder, normalizePath(`${rootFolderPath}/${rename.originalRelativePath}`));
+      }
+    }
+  }
+
+  private async getFolderPlaceholderPath(folder: TFolder): Promise<string> {
+    const parentPath = folder.parent?.path ?? "";
+    let index = 1;
+    while (true) {
+      const candidate = parentPath ? normalizePath(`${parentPath}/目录${index}`) : `目录${index}`;
+      if (candidate === folder.path || !(await this.app.vault.adapter.exists(candidate))) {
+        return candidate;
+      }
+      index += 1;
+    }
+  }
+
+  private relativeToRoot(root: string, path: string): string {
+    const prefix = `${root}/`;
+    return path.startsWith(prefix) ? path.slice(prefix.length) : path;
   }
 
   private safeDecodeTarget(target: string): string {

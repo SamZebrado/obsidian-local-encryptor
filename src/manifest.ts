@@ -23,6 +23,19 @@ export interface TimestampManifestRecord {
   createdAt: string;
 }
 
+export interface FolderRenameRecord {
+  originalRelativePath: string;
+  encryptedRelativePath: string;
+}
+
+export interface FolderBatchManifestRecord {
+  kind: "local-encryptor-folder-manifest";
+  version: 1;
+  rootFolderPath: string;
+  folderRenames: FolderRenameRecord[];
+  createdAt: string;
+}
+
 function sanitizeFilePath(path: string): string {
   return path.replace(/[\\/]/g, "__").replace(/[^a-zA-Z0-9._-]/g, "_");
 }
@@ -92,4 +105,62 @@ export async function writeTimestampManifest(
   const manifestPath = targetDir ? normalizeVaultPath(`${targetDir}/${filename}`) : filename;
   await plugin.app.vault.adapter.write(manifestPath, JSON.stringify(record, null, 2));
   return manifestPath;
+}
+
+export function buildFolderBatchManifest(
+  rootFolderPath: string,
+  folderRenames: FolderRenameRecord[]
+): FolderBatchManifestRecord {
+  return {
+    kind: "local-encryptor-folder-manifest",
+    version: 1,
+    rootFolderPath,
+    folderRenames,
+    createdAt: new Date().toISOString()
+  };
+}
+
+export function getFolderBatchManifestPath(rootFolderPath: string): string {
+  return normalizeVaultPath(`${rootFolderPath}/.local-encryptor-folder-manifest.json`);
+}
+
+export async function writeFolderBatchManifest(
+  plugin: Plugin,
+  record: FolderBatchManifestRecord
+): Promise<string> {
+  const path = getFolderBatchManifestPath(record.rootFolderPath);
+  await plugin.app.vault.adapter.write(path, JSON.stringify(record, null, 2));
+  return path;
+}
+
+export async function readFolderBatchManifest(
+  plugin: Plugin,
+  rootFolderPath: string
+): Promise<FolderBatchManifestRecord | null> {
+  const path = getFolderBatchManifestPath(rootFolderPath);
+  if (!(await plugin.app.vault.adapter.exists(path))) {
+    return null;
+  }
+
+  const content = await plugin.app.vault.adapter.read(path);
+  const parsed = JSON.parse(content) as Partial<FolderBatchManifestRecord>;
+  if (
+    parsed.kind !== "local-encryptor-folder-manifest" ||
+    parsed.version !== 1 ||
+    parsed.rootFolderPath !== rootFolderPath ||
+    !Array.isArray(parsed.folderRenames)
+  ) {
+    return null;
+  }
+
+  return {
+    kind: parsed.kind,
+    version: parsed.version,
+    rootFolderPath: parsed.rootFolderPath,
+    folderRenames: parsed.folderRenames.filter(
+      (item): item is FolderRenameRecord =>
+        typeof item?.originalRelativePath === "string" && typeof item?.encryptedRelativePath === "string"
+    ),
+    createdAt: typeof parsed.createdAt === "string" ? parsed.createdAt : new Date().toISOString()
+  };
 }
