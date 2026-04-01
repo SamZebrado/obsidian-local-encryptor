@@ -81,7 +81,7 @@ function cleanMarkdownTarget(raw: string): string {
 export function extractLocalImageTargets(content: string): LocalImageTarget[] {
   const found = new Map<string, LocalImageTarget>();
 
-  for (const match of content.matchAll(/!\[\[([^\]]+)\]\]/g)) {
+  for (const match of content.matchAll(/!?\[\[([^\]]+)\]\]/g)) {
     const target = cleanWikiTarget(match[1] ?? "");
     if (!target || !isLocalTarget(target)) {
       continue;

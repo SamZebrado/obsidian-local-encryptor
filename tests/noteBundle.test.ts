@@ -27,12 +27,25 @@ test("extractLocalImagePaths finds local markdown and wiki image references", ()
 test("extractLocalImageTargets preserves raw local targets for later vault resolution", () => {
   const content = [
     "![[Pasted image 2026-04-01 10.00.00.png]]",
+    "[[相册/封面.webp]]",
     "![alt](../assets/%E5%9B%BE%E7%89%87%201.png)"
   ].join("\n");
 
   assert.deepEqual(extractLocalImageTargets(content), [
     { source: "wiki", target: "Pasted image 2026-04-01 10.00.00.png" },
+    { source: "wiki", target: "相册/封面.webp" },
     { source: "markdown", target: "../assets/%E5%9B%BE%E7%89%87%201.png" }
+  ]);
+});
+
+test("extractLocalImagePaths also accepts plain wiki links to image files", () => {
+  const content = [
+    "[[gallery/photo.jpeg]]",
+    "[[docs/readme]]"
+  ].join("\n");
+
+  assert.deepEqual(extractLocalImagePaths("notes/daily/today.md", content), [
+    "notes/daily/gallery/photo.jpeg"
   ]);
 });
 
