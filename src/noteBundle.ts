@@ -9,6 +9,11 @@ export interface DecryptedNoteBundle {
   attachments: BundledAttachment[];
 }
 
+export interface LocalImageTarget {
+  source: "wiki" | "markdown";
+  target: string;
+}
+
 interface SerializedNoteBundle {
   kind: "local-encryptor-note-bundle";
   version: 1;
@@ -54,7 +59,7 @@ function isLocalTarget(target: string): boolean {
   return !/^(?:https?:|data:|mailto:)/i.test(target);
 }
 
-function isImagePath(path: string): boolean {
+export function isImagePath(path: string): boolean {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   return IMAGE_EXTENSIONS.has(extension);
 }
@@ -73,9 +78,8 @@ function cleanMarkdownTarget(raw: string): string {
   return titleSeparator ? trimmed.slice(0, titleSeparator.index).trim() : trimmed;
 }
 
-export function extractLocalImagePaths(notePath: string, content: string): string[] {
-  const found = new Set<string>();
-  const noteDir = dirname(notePath);
+export function extractLocalImageTargets(content: string): LocalImageTarget[] {
+  const found = new Map<string, LocalImageTarget>();
 
   for (const match of content.matchAll(/!\[\[([^\]]+)\]\]/g)) {
     const target = cleanWikiTarget(match[1] ?? "");
@@ -83,10 +87,7 @@ export function extractLocalImagePaths(notePath: string, content: string): strin
       continue;
     }
 
-    const resolved = resolveRelativePath(noteDir, target);
-    if (isImagePath(resolved)) {
-      found.add(resolved);
-    }
+    found.set(`wiki:${target}`, { source: "wiki", target });
   }
 
   for (const match of content.matchAll(/!\[[^\]]*]\(([^)]+)\)/g)) {
@@ -95,13 +96,46 @@ export function extractLocalImagePaths(notePath: string, content: string): strin
       continue;
     }
 
-    const resolved = resolveRelativePath(noteDir, target);
+    found.set(`markdown:${target}`, { source: "markdown", target });
+  }
+
+  return [...found.values()];
+}
+
+export function extractLocalImagePaths(notePath: string, content: string): string[] {
+  const found = new Set<string>();
+  const noteDir = dirname(notePath);
+
+  for (const reference of extractLocalImageTargets(content)) {
+    const resolved = resolveRelativePath(noteDir, reference.target);
     if (isImagePath(resolved)) {
       found.add(resolved);
     }
   }
 
   return [...found].sort((left, right) => left.localeCompare(right));
+}
+
+export function buildAttachmentLookupCandidates(
+  notePath: string,
+  rawTarget: string,
+  metadataResolvedPath?: string | null
+): string[] {
+  const noteDir = dirname(notePath);
+  const candidates = new Set<string>();
+  const decoded = safeDecodeTarget(rawTarget);
+  const normalized = normalizeVaultPath(decoded.replace(/^\/+/, ""));
+
+  if (metadataResolvedPath) {
+    candidates.add(normalizeVaultPath(metadataResolvedPath));
+  }
+
+  candidates.add(normalized);
+  if (noteDir) {
+    candidates.add(resolveRelativePath(noteDir, normalized));
+  }
+
+  return [...candidates];
 }
 
 export function buildNoteBundle(title: string, content: string, attachments: BundledAttachment[]): string {
@@ -119,6 +153,14 @@ export function buildNoteBundle(title: string, content: string, attachments: Bun
 export function sanitizeNoteBasename(title: string): string {
   const sanitized = title.replace(/[\\/:*?"<>|]/g, "_").trim();
   return sanitized || "Untitled";
+}
+
+function safeDecodeTarget(target: string): string {
+  try {
+    return decodeURIComponent(target);
+  } catch {
+    return target;
+  }
 }
 
 export function parseDecryptedNoteBundle(value: string): DecryptedNoteBundle {

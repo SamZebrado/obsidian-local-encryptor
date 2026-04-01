@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildAttachmentLookupCandidates,
   buildNoteBundle,
   extractLocalImagePaths,
+  extractLocalImageTargets,
   parseDecryptedNoteBundle,
   sanitizeNoteBasename
 } from "../src/noteBundle";
@@ -19,6 +21,18 @@ test("extractLocalImagePaths finds local markdown and wiki image references", ()
   assert.deepEqual(extractLocalImagePaths("notes/daily/today.md", content), [
     "notes/daily/assets/pic one.png",
     "notes/shared/图像.jpg"
+  ]);
+});
+
+test("extractLocalImageTargets preserves raw local targets for later vault resolution", () => {
+  const content = [
+    "![[Pasted image 2026-04-01 10.00.00.png]]",
+    "![alt](../assets/%E5%9B%BE%E7%89%87%201.png)"
+  ].join("\n");
+
+  assert.deepEqual(extractLocalImageTargets(content), [
+    { source: "wiki", target: "Pasted image 2026-04-01 10.00.00.png" },
+    { source: "markdown", target: "../assets/%E5%9B%BE%E7%89%87%201.png" }
   ]);
 });
 
@@ -43,4 +57,19 @@ test("parseDecryptedNoteBundle falls back to raw text for legacy payloads", () =
 test("sanitizeNoteBasename removes illegal filename characters", () => {
   assert.equal(sanitizeNoteBasename('A:B/C*D?"E<F>G|'), "A_B_C_D__E_F_G_");
   assert.equal(sanitizeNoteBasename("   "), "Untitled");
+});
+
+test("buildAttachmentLookupCandidates includes metadata and relative candidates", () => {
+  assert.deepEqual(
+    buildAttachmentLookupCandidates(
+      "notes/daily/today.md",
+      "../assets/%E5%9B%BE%E7%89%87%201.png",
+      "Attachments/图片 1.png"
+    ),
+    [
+      "Attachments/图片 1.png",
+      "../assets/图片 1.png",
+      "notes/assets/图片 1.png"
+    ]
+  );
 });

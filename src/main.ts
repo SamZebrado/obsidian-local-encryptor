@@ -20,9 +20,11 @@ import {
 } from "./encryptedBlock";
 import { MacKeychainPasswordStore } from "./keychain";
 import {
+  buildAttachmentLookupCandidates,
   buildNoteBundle,
   BundledAttachment,
-  extractLocalImagePaths,
+  extractLocalImageTargets,
+  isImagePath,
   parseDecryptedNoteBundle,
   sanitizeNoteBasename
 } from "./noteBundle";
@@ -427,8 +429,8 @@ export default class LocalEncryptorPlugin extends Plugin {
         return { outcome: "skipped", path: file.path, reason: "already encrypted" };
       }
 
-      const imagePaths = extractLocalImagePaths(file.path, current);
-      const sharedPaths = imagePaths.filter((path) => (sharedAttachments.get(path) ?? 0) > 1);
+      const imagePaths = await this.resolveImageAttachmentPaths(file, current);
+      const sharedPaths = imagePaths.filter((path: string) => (sharedAttachments.get(path) ?? 0) > 1);
       if (sharedPaths.length > 0) {
         return {
           outcome: "skipped",
@@ -495,7 +497,7 @@ export default class LocalEncryptorPlugin extends Plugin {
     file: TFile,
     currentContent: string
   ): Promise<{ plaintext: string; attachments: BundledAttachment[] }> {
-    const imagePaths = extractLocalImagePaths(file.path, currentContent);
+    const imagePaths = await this.resolveImageAttachmentPaths(file, currentContent);
     const attachments: BundledAttachment[] = [];
     for (const path of imagePaths) {
       if (!(await this.app.vault.adapter.exists(path))) {
@@ -594,11 +596,54 @@ export default class LocalEncryptorPlugin extends Plugin {
     const counts = new Map<string, number>();
     for (const file of files) {
       const content = await this.app.vault.read(file);
-      for (const path of extractLocalImagePaths(file.path, content)) {
+      for (const path of await this.resolveImageAttachmentPaths(file, content, true)) {
         counts.set(path, (counts.get(path) ?? 0) + 1);
       }
     }
     return counts;
+  }
+
+  private async resolveImageAttachmentPaths(
+    file: TFile,
+    content: string,
+    allowMissing = false
+  ): Promise<string[]> {
+    const found = new Set<string>();
+    for (const reference of extractLocalImageTargets(content)) {
+      const resolved = await this.resolveSingleImageAttachmentPath(file, reference.target);
+      if (resolved) {
+        found.add(resolved);
+        continue;
+      }
+
+      if (!allowMissing) {
+        throw new Error(`Referenced image not found: ${reference.target}`);
+      }
+    }
+
+    return [...found].sort((left, right) => left.localeCompare(right));
+  }
+
+  private async resolveSingleImageAttachmentPath(file: TFile, target: string): Promise<string | null> {
+    const decoded = this.safeDecodeTarget(target);
+    const metadataHit = this.app.metadataCache.getFirstLinkpathDest(decoded, file.path);
+    const metadataPath = metadataHit instanceof TFile ? metadataHit.path : null;
+
+    for (const candidate of buildAttachmentLookupCandidates(file.path, target, metadataPath)) {
+      if (isImagePath(candidate) && (await this.app.vault.adapter.exists(candidate))) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private safeDecodeTarget(target: string): string {
+    try {
+      return decodeURIComponent(target);
+    } catch {
+      return target;
+    }
   }
 
   private async resolvePassword(action: ActionKind): Promise<string | null> {
