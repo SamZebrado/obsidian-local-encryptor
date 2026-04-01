@@ -22,6 +22,8 @@ An offline Obsidian desktop plugin that encrypts selected text, full notes, or t
 - Whole-note and folder encryption add a file-header marker so repeated full-note encryption is skipped
 - Whole-note encryption moves the original note title into the encrypted payload and renames the visible file to a safe placeholder such as `标题1.md`
 - Whole-note encryption bundles local image attachments into the encrypted payload; folder batch mode skips notes that share the same image attachment with other notes and lists them in the final report
+- Whole-note encryption stores note and attachment timestamps inside the encrypted payload and restores modified time where the desktop filesystem adapter allows it
+- Whole-note and folder encryption also write a timestamp manifest JSON in the same directory as the encrypted note, named from the encrypted placeholder title
 
 ## Install for development
 
@@ -63,6 +65,11 @@ For all decrypt actions:
 
 - decryption now always requires an explicit password entry
 - saved passwords in the macOS Keychain are not used for silent decryption anymore
+
+Timestamp note:
+
+- original modified times are preserved in the encrypted payload and restored on decrypt when possible
+- original creation times are also stored in the payload and manifest for reference, but most desktop filesystems do not allow reliable restoration of creation time metadata
 
 ## Encryption verification
 

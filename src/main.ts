@@ -1,5 +1,6 @@
 import {
   Editor,
+  FileSystemAdapter,
   MarkdownView,
   normalizePath,
   Notice,
@@ -19,6 +20,7 @@ import {
   wrapEncryptedPayload
 } from "./encryptedBlock";
 import { MacKeychainPasswordStore } from "./keychain";
+import { buildTimestampManifest, writeTimestampManifest } from "./manifest";
 import {
   buildAttachmentLookupCandidates,
   buildNoteBundle,
@@ -320,10 +322,23 @@ export default class LocalEncryptorPlugin extends Plugin {
         await this.replaceEditorRange(editor, file, encryptedBlock);
         new Notice("Selected text encrypted.");
       } else {
+        const bundle = parseDecryptedNoteBundle(fullNotePayload?.plaintext ?? "");
+        const originalPath = file.path;
+        const originalTitle = file.basename;
         await this.replaceWholeNote(editor, file, encryptedBlock);
         await this.deleteBundledAttachments(fullNotePayload?.attachments ?? []);
         await this.renameFileToPlaceholder(file);
-        new Notice("Current note encrypted.");
+        const manifestPath = await writeTimestampManifest(
+          this,
+          buildTimestampManifest(
+            originalPath,
+            file.path,
+            originalTitle,
+            bundle.noteTimestamps,
+            fullNotePayload?.attachments ?? []
+          )
+        );
+        new Notice(`Current note encrypted. Timestamp manifest saved to ${manifestPath}.`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -439,11 +454,18 @@ export default class LocalEncryptorPlugin extends Plugin {
         };
       }
 
+      const originalPath = file.path;
+      const originalTitle = file.basename;
       const payload = await this.buildEncryptableNotePayload(file, current);
+      const bundle = parseDecryptedNoteBundle(payload.plaintext);
       const encryptedBlock = await this.buildVerifiedEncryptedBlock(file, current, payload.plaintext, password, "note");
       await this.app.vault.modify(file, encryptedBlock);
       await this.deleteBundledAttachments(payload.attachments);
       await this.renameFileToPlaceholder(file);
+      await writeTimestampManifest(
+        this,
+        buildTimestampManifest(originalPath, file.path, originalTitle, bundle.noteTimestamps, payload.attachments)
+      );
       return { outcome: "updated", path: file.path };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -497,22 +519,28 @@ export default class LocalEncryptorPlugin extends Plugin {
     file: TFile,
     currentContent: string
   ): Promise<{ plaintext: string; attachments: BundledAttachment[] }> {
+    const noteStat = await this.app.vault.adapter.stat(file.path);
     const imagePaths = await this.resolveImageAttachmentPaths(file, currentContent);
     const attachments: BundledAttachment[] = [];
     for (const path of imagePaths) {
-      if (!(await this.app.vault.adapter.exists(path))) {
+      const attachmentStat = await this.app.vault.adapter.stat(path);
+      if (!attachmentStat) {
         throw new Error(`Referenced image not found: ${path}`);
       }
-
       const binary = await this.app.vault.adapter.readBinary(path);
       attachments.push({
         path,
-        dataBase64: Buffer.from(binary).toString("base64")
+        dataBase64: Buffer.from(binary).toString("base64"),
+        mtime: attachmentStat.mtime,
+        ctime: attachmentStat.ctime
       });
     }
 
     return {
-      plaintext: buildNoteBundle(file.basename, currentContent, attachments),
+      plaintext: buildNoteBundle(file.basename, currentContent, attachments, {
+        mtime: noteStat?.mtime,
+        ctime: noteStat?.ctime
+      }),
       attachments
     };
   }
@@ -528,6 +556,8 @@ export default class LocalEncryptorPlugin extends Plugin {
     if (bundle.title) {
       await this.renameFileToTitle(file, bundle.title);
     }
+
+    await this.restoreFileTimes(file.path, bundle.noteTimestamps);
   }
 
   private async deleteBundledAttachments(attachments: BundledAttachment[]): Promise<void> {
@@ -543,6 +573,7 @@ export default class LocalEncryptorPlugin extends Plugin {
       await this.ensureParentDirectory(attachment.path);
       const bytes = Uint8Array.from(Buffer.from(attachment.dataBase64, "base64"));
       await this.app.vault.adapter.writeBinary(attachment.path, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      await this.restoreFileTimes(attachment.path, attachment);
     }
   }
 
@@ -643,6 +674,31 @@ export default class LocalEncryptorPlugin extends Plugin {
       return decodeURIComponent(target);
     } catch {
       return target;
+    }
+  }
+
+  private async restoreFileTimes(
+    vaultPath: string,
+    times: { mtime?: number; ctime?: number } | null | undefined
+  ): Promise<void> {
+    if (!times?.mtime) {
+      return;
+    }
+
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) {
+      return;
+    }
+
+    const fsPath = adapter.getFullPath(normalizePath(vaultPath));
+    const fs = await import("node:fs/promises");
+    const atime = new Date(times.mtime);
+    const mtime = new Date(times.mtime);
+
+    try {
+      await fs.utimes(fsPath, atime, mtime);
+    } catch (error) {
+      console.warn("[Local Encryptor] Failed to restore mtime for", vaultPath, error);
     }
   }
 

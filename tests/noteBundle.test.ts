@@ -51,13 +51,14 @@ test("extractLocalImagePaths also accepts plain wiki links to image files", () =
 
 test("buildNoteBundle and parseDecryptedNoteBundle round-trip title, content, and attachments", () => {
   const serialized = buildNoteBundle("原始标题", "# 内容", [
-    { path: "assets/photo.png", dataBase64: "YWJj" }
-  ]);
+    { path: "assets/photo.png", dataBase64: "YWJj", mtime: 111, ctime: 100 }
+  ], { mtime: 333, ctime: 222 });
 
   const parsed = parseDecryptedNoteBundle(serialized);
   assert.equal(parsed.title, "原始标题");
   assert.equal(parsed.content, "# 内容");
-  assert.deepEqual(parsed.attachments, [{ path: "assets/photo.png", dataBase64: "YWJj" }]);
+  assert.deepEqual(parsed.attachments, [{ path: "assets/photo.png", dataBase64: "YWJj", mtime: 111, ctime: 100 }]);
+  assert.deepEqual(parsed.noteTimestamps, { mtime: 333, ctime: 222 });
 });
 
 test("parseDecryptedNoteBundle falls back to raw text for legacy payloads", () => {
@@ -65,6 +66,7 @@ test("parseDecryptedNoteBundle falls back to raw text for legacy payloads", () =
   assert.equal(parsed.title, null);
   assert.equal(parsed.content, "legacy plaintext");
   assert.deepEqual(parsed.attachments, []);
+  assert.deepEqual(parsed.noteTimestamps, {});
 });
 
 test("sanitizeNoteBasename removes illegal filename characters", () => {
@@ -85,4 +87,17 @@ test("buildAttachmentLookupCandidates includes metadata and relative candidates"
       "notes/assets/图片 1.png"
     ]
   );
+});
+
+test("attachment bytes survive bundle serialization exactly", () => {
+  const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
+  const base64 = Buffer.from(bytes).toString("base64");
+  const serialized = buildNoteBundle("图", "正文", [
+    { path: "assets/test.png", dataBase64: base64, mtime: 999 }
+  ]);
+
+  const parsed = parseDecryptedNoteBundle(serialized);
+  const restored = Uint8Array.from(Buffer.from(parsed.attachments[0].dataBase64, "base64"));
+  assert.deepEqual([...restored], [...bytes]);
+  assert.equal(parsed.attachments[0].mtime, 999);
 });

@@ -1,0 +1,23 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { buildTimestampManifest } from "../src/manifest";
+
+test("buildTimestampManifest captures note and attachment times", () => {
+  const manifest = buildTimestampManifest(
+    "notes/plain.md",
+    "notes/标题1.md",
+    "plain",
+    { mtime: 300, ctime: 200 },
+    [
+      { path: "assets/a.png", dataBase64: "AA==", mtime: 123, ctime: 100 }
+    ]
+  );
+
+  assert.equal(manifest.kind, "local-encryptor-timestamps");
+  assert.equal(manifest.originalNotePath, "notes/plain.md");
+  assert.equal(manifest.encryptedNotePath, "notes/标题1.md");
+  assert.equal(manifest.originalTitle, "plain");
+  assert.deepEqual(manifest.noteTimestamps, { mtime: 300, ctime: 200 });
+  assert.deepEqual(manifest.attachments, [{ path: "assets/a.png", mtime: 123, ctime: 100 }]);
+});

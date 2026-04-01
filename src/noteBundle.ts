@@ -1,12 +1,20 @@
 export interface BundledAttachment {
   path: string;
   dataBase64: string;
+  mtime?: number;
+  ctime?: number;
+}
+
+export interface BundledTimestamps {
+  mtime?: number;
+  ctime?: number;
 }
 
 export interface DecryptedNoteBundle {
   title: string | null;
   content: string;
   attachments: BundledAttachment[];
+  noteTimestamps: BundledTimestamps;
 }
 
 export interface LocalImageTarget {
@@ -20,6 +28,7 @@ interface SerializedNoteBundle {
   title: string;
   content: string;
   attachments: BundledAttachment[];
+  noteTimestamps: BundledTimestamps;
 }
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp"]);
@@ -138,13 +147,19 @@ export function buildAttachmentLookupCandidates(
   return [...candidates];
 }
 
-export function buildNoteBundle(title: string, content: string, attachments: BundledAttachment[]): string {
+export function buildNoteBundle(
+  title: string,
+  content: string,
+  attachments: BundledAttachment[],
+  noteTimestamps: BundledTimestamps = {}
+): string {
   const payload: SerializedNoteBundle = {
     kind: "local-encryptor-note-bundle",
     version: 1,
     title,
     content,
-    attachments
+    attachments,
+    noteTimestamps
   };
 
   return JSON.stringify(payload);
@@ -178,21 +193,33 @@ export function parseDecryptedNoteBundle(value: string): DecryptedNoteBundle {
         content: parsed.content,
         attachments: parsed.attachments.filter(
           (attachment): attachment is BundledAttachment =>
-            typeof attachment?.path === "string" && typeof attachment?.dataBase64 === "string"
-        )
+            typeof attachment?.path === "string" &&
+            typeof attachment?.dataBase64 === "string" &&
+            (attachment.mtime === undefined || typeof attachment.mtime === "number") &&
+            (attachment.ctime === undefined || typeof attachment.ctime === "number")
+        ),
+        noteTimestamps:
+          parsed.noteTimestamps &&
+          typeof parsed.noteTimestamps === "object" &&
+          (parsed.noteTimestamps.mtime === undefined || typeof parsed.noteTimestamps.mtime === "number") &&
+          (parsed.noteTimestamps.ctime === undefined || typeof parsed.noteTimestamps.ctime === "number")
+            ? parsed.noteTimestamps
+            : {}
       };
     }
   } catch {
     return {
       title: null,
       content: value,
-      attachments: []
+      attachments: [],
+      noteTimestamps: {}
     };
   }
 
   return {
     title: null,
     content: value,
-    attachments: []
+    attachments: [],
+    noteTimestamps: {}
   };
 }
