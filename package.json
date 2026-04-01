@@ -1,0 +1,30 @@
+{
+  "name": "obsidian-local-encryptor",
+  "version": "0.1.0",
+  "description": "Offline note encryption plugin for Obsidian.",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "package": "npm run build && node scripts/package-plugin.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test build-tests/tests/*.test.js",
+    "lint:offline": "node scripts/check-offline.mjs",
+    "lint:secrets": "node scripts/check-no-secrets.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "encryption",
+    "offline"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "builtin-modules": "^5.0.0",
+    "esbuild": "^0.25.11",
+    "obsidian": "^1.8.10",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules
+build-tests
+main.js
+data.json
+release
+.DS_Store

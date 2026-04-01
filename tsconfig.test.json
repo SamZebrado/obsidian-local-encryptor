@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "target": "ES2022",
+    "lib": [
+      "DOM",
+      "ES2022"
+    ],
+    "moduleResolution": "NodeNext",
+    "rootDir": ".",
+    "outDir": "build-tests",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src/crypto.ts",
+    "src/encryptedBlock.ts",
+    "src/backup.ts",
+    "src/keychain.ts",
+    "tests/**/*.ts"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "local-encryptor",
+  "name": "Local Encryptor",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.0",
+  "description": "Offline AES-256-GCM note encryption with local backups and macOS keychain support.",
+  "author": "Codex",
+  "authorUrl": "",
+  "isDesktopOnly": true
+}
