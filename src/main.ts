@@ -1,6 +1,7 @@
 import {
   Editor,
   MarkdownView,
+  normalizePath,
   Notice,
   Plugin,
   TFile,
@@ -18,6 +19,13 @@ import {
   wrapEncryptedPayload
 } from "./encryptedBlock";
 import { MacKeychainPasswordStore } from "./keychain";
+import {
+  buildNoteBundle,
+  BundledAttachment,
+  extractLocalImagePaths,
+  parseDecryptedNoteBundle,
+  sanitizeNoteBasename
+} from "./noteBundle";
 import { PasswordModal, PasswordPromptResult } from "./passwordModal";
 import { ReportModal } from "./reportModal";
 
@@ -216,7 +224,7 @@ export default class LocalEncryptorPlugin extends Plugin {
       return;
     }
 
-    const password = await this.resolvePassword("decrypt");
+    const password = await this.resolveDecryptionPassword();
     if (!password) {
       return;
     }
@@ -226,10 +234,6 @@ export default class LocalEncryptorPlugin extends Plugin {
       await this.replaceEditorRange(editor, view.file!, decrypted);
       new Notice("Selected text decrypted.");
     } catch (error) {
-      if (await this.retryWithPromptAfterKeychainFailure(error, editor, view, encryptedPayload, "selection")) {
-        return;
-      }
-
       this.showError(error);
     }
   }
@@ -259,55 +263,17 @@ export default class LocalEncryptorPlugin extends Plugin {
       return;
     }
 
-    const password = await this.resolvePassword("decrypt");
+    const password = await this.resolveDecryptionPassword();
     if (!password) {
       return;
     }
 
     try {
       const decrypted = await decryptText(encryptedPayload, password);
-      await this.replaceWholeNote(editor, file, decrypted);
+      await this.applyDecryptedNote(editor, file, decrypted);
       new Notice("Current note decrypted.");
     } catch (error) {
-      if (await this.retryWithPromptAfterKeychainFailure(error, editor, file, encryptedPayload, "note")) {
-        return;
-      }
-
       this.showError(error);
-    }
-  }
-
-  private async retryWithPromptAfterKeychainFailure(
-    error: unknown,
-    editor: Editor,
-    target: FileBackedView | TFile,
-    encryptedPayload: string,
-    scope: "selection" | "note"
-  ): Promise<boolean> {
-    if (!(error instanceof Error) || !error.message.includes("incorrect")) {
-      return false;
-    }
-
-    const password = await this.promptForPassword({
-      action: "decrypt",
-      allowRemember: false
-    });
-    if (!password) {
-      return true;
-    }
-
-    try {
-      const decrypted = await decryptText(encryptedPayload, password.password);
-      if (scope === "selection" && "file" in target) {
-        await this.replaceEditorRange(editor, target.file!, decrypted);
-      } else if (scope === "note" && target instanceof TFile) {
-        await this.replaceWholeNote(editor, target, decrypted);
-      }
-      new Notice(scope === "selection" ? "Selected text decrypted." : "Current note decrypted.");
-      return true;
-    } catch (retryError) {
-      this.showError(retryError);
-      return true;
     }
   }
 
@@ -340,12 +306,21 @@ export default class LocalEncryptorPlugin extends Plugin {
     const current = editor.getValue();
 
     try {
-      const encryptedBlock = await this.buildVerifiedEncryptedBlock(file, current, plaintext, password, scope);
+      const fullNotePayload = scope === "note" ? await this.buildEncryptableNotePayload(file, current) : null;
+      const encryptedBlock = await this.buildVerifiedEncryptedBlock(
+        file,
+        current,
+        fullNotePayload?.plaintext ?? plaintext,
+        password,
+        scope
+      );
       if (scope === "selection") {
         await this.replaceEditorRange(editor, file, encryptedBlock);
         new Notice("Selected text encrypted.");
       } else {
         await this.replaceWholeNote(editor, file, encryptedBlock);
+        await this.deleteBundledAttachments(fullNotePayload?.attachments ?? []);
+        await this.renameFileToPlaceholder(file);
         new Notice("Current note encrypted.");
       }
     } catch (error) {
@@ -402,7 +377,7 @@ export default class LocalEncryptorPlugin extends Plugin {
       return;
     }
 
-    const password = await this.resolvePassword(action);
+    const password = await this.resolveFolderPassword(action);
     if (!password) {
       return;
     }
@@ -414,10 +389,12 @@ export default class LocalEncryptorPlugin extends Plugin {
       return;
     }
 
+    const sharedAttachments =
+      action === "encrypt" ? await this.buildSharedAttachmentMap(files) : new Map<string, number>();
     const results: BatchResult[] = [];
     for (const file of files) {
       if (action === "encrypt") {
-        results.push(await this.encryptFileInBatch(file, password));
+        results.push(await this.encryptFileInBatch(file, password, sharedAttachments));
       } else {
         results.push(await this.decryptFileInBatch(file, password));
       }
@@ -435,7 +412,11 @@ export default class LocalEncryptorPlugin extends Plugin {
       .sort((a, b) => a.path.localeCompare(b.path));
   }
 
-  private async encryptFileInBatch(file: TFile, password: string): Promise<BatchResult> {
+  private async encryptFileInBatch(
+    file: TFile,
+    password: string,
+    sharedAttachments: Map<string, number>
+  ): Promise<BatchResult> {
     try {
       const current = await this.app.vault.read(file);
       if (!current.trim()) {
@@ -446,8 +427,21 @@ export default class LocalEncryptorPlugin extends Plugin {
         return { outcome: "skipped", path: file.path, reason: "already encrypted" };
       }
 
-      const encryptedBlock = await this.buildVerifiedEncryptedBlock(file, current, current, password, "note");
+      const imagePaths = extractLocalImagePaths(file.path, current);
+      const sharedPaths = imagePaths.filter((path) => (sharedAttachments.get(path) ?? 0) > 1);
+      if (sharedPaths.length > 0) {
+        return {
+          outcome: "skipped",
+          path: file.path,
+          reason: `shared image attachments: ${sharedPaths.join(", ")}`
+        };
+      }
+
+      const payload = await this.buildEncryptableNotePayload(file, current);
+      const encryptedBlock = await this.buildVerifiedEncryptedBlock(file, current, payload.plaintext, password, "note");
       await this.app.vault.modify(file, encryptedBlock);
+      await this.deleteBundledAttachments(payload.attachments);
+      await this.renameFileToPlaceholder(file);
       return { outcome: "updated", path: file.path };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -464,7 +458,7 @@ export default class LocalEncryptorPlugin extends Plugin {
 
       const encryptedPayload = unwrapEncryptedNote(current);
       const decrypted = await decryptText(encryptedPayload, password);
-      await this.app.vault.modify(file, decrypted);
+      await this.applyDecryptedNote(null, file, decrypted);
       return { outcome: "updated", path: file.path };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -479,14 +473,132 @@ export default class LocalEncryptorPlugin extends Plugin {
 
     const actionLabel = action === "encrypt" ? "encryption" : "decryption";
     new Notice(
-      `Folder ${actionLabel} finished for ${folderPath}. ${updated.length} updated, ${skipped.length} skipped, ${failed.length} failed.`,
+      `Folder ${actionLabel} finished for ${folderPath}. ${updated.length} updated, ${skipped.length} skipped, ${failed.length} failed. Review the details dialog for skipped or failed files.`,
       8000
     );
 
-    if (failed.length > 0) {
-      const lines = failed.map((result) => `${result.path}: ${result.reason ?? "unknown error"}`);
-      new ReportModal(this.app, `Folder ${actionLabel} failures`, lines).open();
+    if (failed.length > 0 || skipped.length > 0) {
+      const lines: string[] = [];
+      if (skipped.length > 0) {
+        lines.push(`Skipped (${skipped.length})`);
+        lines.push(...skipped.map((result) => `${result.path}: ${result.reason ?? "skipped"}`));
+      }
+      if (failed.length > 0) {
+        lines.push(`Failed (${failed.length})`);
+        lines.push(...failed.map((result) => `${result.path}: ${result.reason ?? "unknown error"}`));
+      }
+      new ReportModal(this.app, `Folder ${actionLabel} details`, lines).open();
     }
+  }
+
+  private async buildEncryptableNotePayload(
+    file: TFile,
+    currentContent: string
+  ): Promise<{ plaintext: string; attachments: BundledAttachment[] }> {
+    const imagePaths = extractLocalImagePaths(file.path, currentContent);
+    const attachments: BundledAttachment[] = [];
+    for (const path of imagePaths) {
+      if (!(await this.app.vault.adapter.exists(path))) {
+        throw new Error(`Referenced image not found: ${path}`);
+      }
+
+      const binary = await this.app.vault.adapter.readBinary(path);
+      attachments.push({
+        path,
+        dataBase64: Buffer.from(binary).toString("base64")
+      });
+    }
+
+    return {
+      plaintext: buildNoteBundle(file.basename, currentContent, attachments),
+      attachments
+    };
+  }
+
+  private async applyDecryptedNote(editor: Editor | null, file: TFile, decrypted: string): Promise<void> {
+    const bundle = parseDecryptedNoteBundle(decrypted);
+    await this.restoreBundledAttachments(bundle.attachments);
+    await this.app.vault.modify(file, bundle.content);
+    if (editor) {
+      editor.setValue(bundle.content);
+    }
+
+    if (bundle.title) {
+      await this.renameFileToTitle(file, bundle.title);
+    }
+  }
+
+  private async deleteBundledAttachments(attachments: BundledAttachment[]): Promise<void> {
+    for (const attachment of attachments) {
+      if (await this.app.vault.adapter.exists(attachment.path)) {
+        await this.app.vault.adapter.remove(attachment.path);
+      }
+    }
+  }
+
+  private async restoreBundledAttachments(attachments: BundledAttachment[]): Promise<void> {
+    for (const attachment of attachments) {
+      await this.ensureParentDirectory(attachment.path);
+      const bytes = Uint8Array.from(Buffer.from(attachment.dataBase64, "base64"));
+      await this.app.vault.adapter.writeBinary(attachment.path, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    }
+  }
+
+  private async ensureParentDirectory(path: string): Promise<void> {
+    const normalized = normalizePath(path);
+    const parts = normalized.split("/");
+    parts.pop();
+    let current = "";
+    for (const part of parts) {
+      current = current ? normalizePath(`${current}/${part}`) : part;
+      if (current && !(await this.app.vault.adapter.exists(current))) {
+        await this.app.vault.adapter.mkdir(current);
+      }
+    }
+  }
+
+  private async renameFileToPlaceholder(file: TFile): Promise<void> {
+    const folderPath = file.parent?.path ?? "";
+    let index = 1;
+    while (true) {
+      const candidateBase = `标题${index}`;
+      const candidatePath = this.buildNotePath(folderPath, candidateBase);
+      if (candidatePath === file.path || !(await this.app.vault.adapter.exists(candidatePath))) {
+        await this.app.fileManager.renameFile(file, candidatePath);
+        return;
+      }
+      index += 1;
+    }
+  }
+
+  private async renameFileToTitle(file: TFile, title: string): Promise<void> {
+    const folderPath = file.parent?.path ?? "";
+    const safeTitle = sanitizeNoteBasename(title);
+    let index = 0;
+    while (true) {
+      const candidateBase = index === 0 ? safeTitle : `${safeTitle} (${index})`;
+      const candidatePath = this.buildNotePath(folderPath, candidateBase);
+      if (candidatePath === file.path || !(await this.app.vault.adapter.exists(candidatePath))) {
+        await this.app.fileManager.renameFile(file, candidatePath);
+        return;
+      }
+      index += 1;
+    }
+  }
+
+  private buildNotePath(folderPath: string, basename: string): string {
+    return folderPath ? normalizePath(`${folderPath}/${basename}.md`) : `${basename}.md`;
+  }
+
+  private async buildSharedAttachmentMap(files: TFile[]): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    for (const file of files) {
+      const content = await this.app.vault.read(file);
+      for (const path of extractLocalImagePaths(file.path, content)) {
+        counts.set(path, (counts.get(path) ?? 0) + 1);
+      }
+    }
+    return counts;
   }
 
   private async resolvePassword(action: ActionKind): Promise<string | null> {
@@ -516,6 +628,22 @@ export default class LocalEncryptorPlugin extends Plugin {
     }
 
     return result.password;
+  }
+
+  private async resolveFolderPassword(action: ActionKind): Promise<string | null> {
+    if (action === "decrypt") {
+      return this.resolveDecryptionPassword();
+    }
+
+    return this.resolvePassword(action);
+  }
+
+  private async resolveDecryptionPassword(): Promise<string | null> {
+    const result = await this.promptForPassword({
+      action: "decrypt",
+      allowRemember: false
+    });
+    return result?.password ?? null;
   }
 
   private async promptForPassword(options: {

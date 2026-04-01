@@ -20,6 +20,8 @@ An offline Obsidian desktop plugin that encrypts selected text, full notes, or t
 - Folder right-click menu items for encrypting or decrypting that folder tree
 - Temporary plaintext backup only during encryption verification, removed immediately after success or failure
 - Whole-note and folder encryption add a file-header marker so repeated full-note encryption is skipped
+- Whole-note encryption moves the original note title into the encrypted payload and renames the visible file to a safe placeholder such as `标题1.md`
+- Whole-note encryption bundles local image attachments into the encrypted payload; folder batch mode skips notes that share the same image attachment with other notes and lists them in the final report
 
 ## Install for development
 
@@ -51,6 +53,16 @@ When a full note is encrypted, the file starts with:
 ```
 
 That marker is used to distinguish encrypted notes from normal notes and to block accidental second-pass whole-note encryption.
+
+For folder actions:
+
+- batch decrypt always asks for a password explicitly once per run
+- skipped files are listed in the final details dialog, not just counted
+
+For all decrypt actions:
+
+- decryption now always requires an explicit password entry
+- saved passwords in the macOS Keychain are not used for silent decryption anymore
 
 ## Encryption verification
 
