@@ -11,7 +11,8 @@ test("buildTimestampManifest captures note and attachment times", () => {
     { mtime: 300, ctime: 200 },
     [
       { path: "assets/a.png", dataBase64: "AA==", mtime: 123, ctime: 100 }
-    ]
+    ],
+    [{ target: "missing.png", reason: "image reference could not be resolved" }]
   );
 
   assert.equal(manifest.kind, "local-encryptor-timestamps");
@@ -20,4 +21,5 @@ test("buildTimestampManifest captures note and attachment times", () => {
   assert.equal(manifest.originalTitle, "plain");
   assert.deepEqual(manifest.noteTimestamps, { mtime: 300, ctime: 200 });
   assert.deepEqual(manifest.attachments, [{ path: "assets/a.png", mtime: 123, ctime: 100 }]);
+  assert.deepEqual(manifest.skippedAttachments, [{ target: "missing.png", reason: "image reference could not be resolved" }]);
 });

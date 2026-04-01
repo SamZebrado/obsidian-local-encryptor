@@ -2,6 +2,11 @@ import type { Plugin } from "obsidian";
 
 import type { BundledAttachment, BundledTimestamps } from "./noteBundle";
 
+export interface SkippedAttachmentRecord {
+  target: string;
+  reason: string;
+}
+
 export interface TimestampManifestRecord {
   kind: "local-encryptor-timestamps";
   version: 1;
@@ -14,6 +19,7 @@ export interface TimestampManifestRecord {
     mtime?: number;
     ctime?: number;
   }>;
+  skippedAttachments: SkippedAttachmentRecord[];
   createdAt: string;
 }
 
@@ -54,7 +60,8 @@ export function buildTimestampManifest(
   encryptedNotePath: string,
   originalTitle: string,
   noteTimestamps: BundledTimestamps,
-  attachments: BundledAttachment[]
+  attachments: BundledAttachment[],
+  skippedAttachments: SkippedAttachmentRecord[] = []
 ): TimestampManifestRecord {
   return {
     kind: "local-encryptor-timestamps",
@@ -68,6 +75,7 @@ export function buildTimestampManifest(
       mtime: attachment.mtime,
       ctime: attachment.ctime
     })),
+    skippedAttachments,
     createdAt: new Date().toISOString()
   };
 }

@@ -20,7 +20,7 @@ import {
   wrapEncryptedPayload
 } from "./encryptedBlock";
 import { MacKeychainPasswordStore } from "./keychain";
-import { buildTimestampManifest, writeTimestampManifest } from "./manifest";
+import { buildTimestampManifest, type SkippedAttachmentRecord, writeTimestampManifest } from "./manifest";
 import {
   buildAttachmentLookupCandidates,
   buildNoteBundle,
@@ -41,6 +41,7 @@ interface BatchResult {
   outcome: BatchOutcome;
   path: string;
   reason?: string;
+  warnings?: string[];
 }
 
 const VERIFY_FAILURE_MESSAGE = "还原失败，慎重加密";
@@ -335,10 +336,13 @@ export default class LocalEncryptorPlugin extends Plugin {
             file.path,
             originalTitle,
             bundle.noteTimestamps,
-            fullNotePayload?.attachments ?? []
+            fullNotePayload?.attachments ?? [],
+            fullNotePayload?.skippedAttachments ?? []
           )
         );
-        new Notice(`Current note encrypted. Timestamp manifest saved to ${manifestPath}.`);
+        const skippedCount = fullNotePayload?.skippedAttachments.length ?? 0;
+        const extra = skippedCount > 0 ? ` ${skippedCount} image references were left unbundled; see manifest.` : "";
+        new Notice(`Current note encrypted. Timestamp manifest saved to ${manifestPath}.${extra}`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -444,29 +448,41 @@ export default class LocalEncryptorPlugin extends Plugin {
         return { outcome: "skipped", path: file.path, reason: "already encrypted" };
       }
 
-      const imagePaths = await this.resolveImageAttachmentPaths(file, current);
-      const sharedPaths = imagePaths.filter((path: string) => (sharedAttachments.get(path) ?? 0) > 1);
-      if (sharedPaths.length > 0) {
-        return {
-          outcome: "skipped",
-          path: file.path,
-          reason: `shared image attachments: ${sharedPaths.join(", ")}`
-        };
-      }
-
       const originalPath = file.path;
       const originalTitle = file.basename;
       const payload = await this.buildEncryptableNotePayload(file, current);
+      const bundledAttachments = payload.attachments.filter((attachment) => {
+        if ((sharedAttachments.get(attachment.path) ?? 0) > 1) {
+          payload.skippedAttachments.push({
+            target: attachment.path,
+            reason: "shared image attachment was left in place"
+          });
+          return false;
+        }
+        return true;
+      });
       const bundle = parseDecryptedNoteBundle(payload.plaintext);
-      const encryptedBlock = await this.buildVerifiedEncryptedBlock(file, current, payload.plaintext, password, "note");
+      const encryptedPlaintext = buildNoteBundle(file.basename, current, bundledAttachments, bundle.noteTimestamps);
+      const encryptedBlock = await this.buildVerifiedEncryptedBlock(file, current, encryptedPlaintext, password, "note");
       await this.app.vault.modify(file, encryptedBlock);
-      await this.deleteBundledAttachments(payload.attachments);
+      await this.deleteBundledAttachments(bundledAttachments);
       await this.renameFileToPlaceholder(file);
       await writeTimestampManifest(
         this,
-        buildTimestampManifest(originalPath, file.path, originalTitle, bundle.noteTimestamps, payload.attachments)
+        buildTimestampManifest(
+          originalPath,
+          file.path,
+          originalTitle,
+          bundle.noteTimestamps,
+          bundledAttachments,
+          payload.skippedAttachments
+        )
       );
-      return { outcome: "updated", path: file.path };
+      return {
+        outcome: "updated",
+        path: file.path,
+        warnings: payload.skippedAttachments.map((item) => `${item.target}: ${item.reason}`)
+      };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       return { outcome: "failed", path: file.path, reason };
@@ -494,15 +510,20 @@ export default class LocalEncryptorPlugin extends Plugin {
     const updated = results.filter((result) => result.outcome === "updated");
     const skipped = results.filter((result) => result.outcome === "skipped");
     const failed = results.filter((result) => result.outcome === "failed");
+    const warnings = updated.flatMap((result) => (result.warnings ?? []).map((warning) => `${result.path}: ${warning}`));
 
     const actionLabel = action === "encrypt" ? "encryption" : "decryption";
     new Notice(
-      `Folder ${actionLabel} finished for ${folderPath}. ${updated.length} updated, ${skipped.length} skipped, ${failed.length} failed. Review the details dialog for skipped or failed files.`,
+      `Folder ${actionLabel} finished for ${folderPath}. ${updated.length} updated, ${skipped.length} skipped, ${failed.length} failed. Review the details dialog for skipped, failed, or unbundled images.`,
       8000
     );
 
-    if (failed.length > 0 || skipped.length > 0) {
+    if (failed.length > 0 || skipped.length > 0 || warnings.length > 0) {
       const lines: string[] = [];
+      if (warnings.length > 0) {
+        lines.push(`Unbundled images (${warnings.length})`);
+        lines.push(...warnings);
+      }
       if (skipped.length > 0) {
         lines.push(`Skipped (${skipped.length})`);
         lines.push(...skipped.map((result) => `${result.path}: ${result.reason ?? "skipped"}`));
@@ -518,11 +539,15 @@ export default class LocalEncryptorPlugin extends Plugin {
   private async buildEncryptableNotePayload(
     file: TFile,
     currentContent: string
-  ): Promise<{ plaintext: string; attachments: BundledAttachment[] }> {
+  ): Promise<{
+    plaintext: string;
+    attachments: BundledAttachment[];
+    skippedAttachments: SkippedAttachmentRecord[];
+  }> {
     const noteStat = await this.app.vault.adapter.stat(file.path);
-    const imagePaths = await this.resolveImageAttachmentPaths(file, currentContent);
+    const resolution = await this.resolveImageAttachmentPaths(file, currentContent);
     const attachments: BundledAttachment[] = [];
-    for (const path of imagePaths) {
+    for (const path of resolution.found) {
       const attachmentStat = await this.app.vault.adapter.stat(path);
       if (!attachmentStat) {
         throw new Error(`Referenced image not found: ${path}`);
@@ -541,7 +566,8 @@ export default class LocalEncryptorPlugin extends Plugin {
         mtime: noteStat?.mtime,
         ctime: noteStat?.ctime
       }),
-      attachments
+      attachments,
+      skippedAttachments: resolution.skipped
     };
   }
 
@@ -627,7 +653,7 @@ export default class LocalEncryptorPlugin extends Plugin {
     const counts = new Map<string, number>();
     for (const file of files) {
       const content = await this.app.vault.read(file);
-      for (const path of await this.resolveImageAttachmentPaths(file, content, true)) {
+      for (const path of (await this.resolveImageAttachmentPaths(file, content, true)).found) {
         counts.set(path, (counts.get(path) ?? 0) + 1);
       }
     }
@@ -638,8 +664,9 @@ export default class LocalEncryptorPlugin extends Plugin {
     file: TFile,
     content: string,
     allowMissing = false
-  ): Promise<string[]> {
+  ): Promise<{ found: string[]; skipped: SkippedAttachmentRecord[] }> {
     const found = new Set<string>();
+    const skipped: SkippedAttachmentRecord[] = [];
     for (const reference of extractLocalImageTargets(content)) {
       const resolved = await this.resolveSingleImageAttachmentPath(file, reference.target);
       if (resolved) {
@@ -648,11 +675,17 @@ export default class LocalEncryptorPlugin extends Plugin {
       }
 
       if (!allowMissing) {
-        throw new Error(`Referenced image not found: ${reference.target}`);
+        skipped.push({
+          target: reference.target,
+          reason: "image reference could not be resolved"
+        });
       }
     }
 
-    return [...found].sort((left, right) => left.localeCompare(right));
+    return {
+      found: [...found].sort((left, right) => left.localeCompare(right)),
+      skipped
+    };
   }
 
   private async resolveSingleImageAttachmentPath(file: TFile, target: string): Promise<string | null> {
