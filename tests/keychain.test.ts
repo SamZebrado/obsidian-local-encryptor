@@ -46,3 +46,26 @@ test("missing keychain items return null instead of throwing", async () => {
   assert.equal(await store.getPassword(), null);
   await assert.doesNotReject(() => store.deletePassword());
 });
+
+
+test("keychain failures do not expose command arguments or upstream output", async () => {
+  const password = "synthetic-regression-password";
+  const upstreamDetails = `Command failed: security add-generic-password -w ${password}\nprivate upstream output`;
+  const runner: Runner = async () => {
+    throw new Error(upstreamDetails);
+  };
+  const store = new MacKeychainPasswordStore("Service", "Account", runner, "darwin");
+  for (const [operation, expected] of [
+    [() => store.setPassword(password), "Failed to store the password in macOS Keychain."],
+    [() => store.getPassword(), "Failed to read the macOS Keychain item."],
+    [() => store.deletePassword(), "Failed to delete the macOS Keychain item."]
+  ] as const) {
+    await assert.rejects(operation, (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, expected);
+      assert.equal(error.message.includes(password), false);
+      assert.equal(error.message.includes("private upstream output"), false);
+      return true;
+    });
+  }
+});

@@ -57,7 +57,7 @@ export class MacKeychainPasswordStore implements PasswordStore {
         return null;
       }
 
-      throw new Error(getSecurityErrorMessage(error, "Failed to read the macOS Keychain item."));
+      throw new Error("Failed to read the macOS Keychain item.");
     }
   }
 
@@ -82,7 +82,7 @@ export class MacKeychainPasswordStore implements PasswordStore {
         password
       ]);
     } catch (error) {
-      throw new Error(getSecurityErrorMessage(error, "Failed to store the password in macOS Keychain."));
+      throw new Error("Failed to store the password in macOS Keychain.");
     }
   }
 
@@ -104,7 +104,7 @@ export class MacKeychainPasswordStore implements PasswordStore {
         return;
       }
 
-      throw new Error(getSecurityErrorMessage(error, "Failed to delete the macOS Keychain item."));
+      throw new Error("Failed to delete the macOS Keychain item.");
     }
   }
 }
@@ -112,12 +112,4 @@ export class MacKeychainPasswordStore implements PasswordStore {
 function isMissingItemError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("could not be found") || message.includes("The specified item could not be found");
-}
-
-function getSecurityErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message) {
-    return `${fallback} ${error.message}`;
-  }
-
-  return fallback;
 }
