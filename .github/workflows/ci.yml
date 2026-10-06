@@ -18,3 +18,4 @@ jobs:
       - run: npm test
       - run: npm run lint:offline
       - run: npm run lint:secrets
+      - run: npm run package
